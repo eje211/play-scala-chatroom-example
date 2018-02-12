@@ -3,14 +3,20 @@ package controllers
 import java.net.URI
 import javax.inject._
 
-import akka.actor.ActorSystem
+import akka.NotUsed
+import akka.actor.{ActorRef, ActorSystem}
 import akka.event.Logging
-import akka.stream.Materializer
-import akka.stream.scaladsl.{BroadcastHub, Flow, Keep, MergeHub, Source}
+import akka.stream.javadsl.RunnableGraph
+import akka.stream.{Attributes, ClosedShape, Materializer}
+import akka.stream.scaladsl.{BroadcastHub, Flow, GraphDSL, Keep, Merge, MergeHub, Sink, Source}
+import akka.util.Timeout
 import play.api.{Logger, MarkerContext}
 import play.api.mvc._
+import play.api.libs.json.Json
 
+import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.duration._
 
 /**
  * A very simple chat client using websockets.
@@ -23,9 +29,13 @@ class HomeController @Inject()(cc: ControllerComponents)
                                webJarsUtil: org.webjars.play.WebJarsUtil) 
                                extends AbstractController(cc) with RequestMarkerContext {
 
-  private type WSMessage = String
+  import GraphDSL.Implicits._
+
+  private type WSMessage = HomeController.WSMessage
 
   private val logger = Logger(getClass)
+
+  private val history: ArrayBuffer[WSMessage] = ArrayBuffer.empty
 
   private implicit val logging = Logging(actorSystem.eventStream, logger.underlyingLogger.getName)
 
@@ -33,11 +43,13 @@ class HomeController @Inject()(cc: ControllerComponents)
   private val (chatSink, chatSource) = {
     // Don't log MergeHub$ProducerFailed as error if the client disconnects.
     // recoverWithRetries -1 is essentially "recoverWith"
-    val source = MergeHub.source[WSMessage]
+    val source = MergeHub
+      .source[WSMessage]
       .log("source")
       .recoverWithRetries(-1, { case _: Exception ⇒ Source.empty })
 
     val sink = BroadcastHub.sink[WSMessage]
+
     source.toMat(sink)(Keep.both).run()
   }
 
@@ -46,10 +58,30 @@ class HomeController @Inject()(cc: ControllerComponents)
   }
 
   def index: Action[AnyContent] = Action { implicit request: RequestHeader =>
-    val webSocketUrl = routes.HomeController.chat().webSocketURL()
+    val webSocketUrl = routes.HomeController.chatWithRecall().webSocketURL()
     logger.info(s"index: ")
-    Ok(views.html.index(webSocketUrl))
+    Ok(views.html.index(webSocketUrl, history.toList))
   }
+
+  def chatWithRecall(): WebSocket =
+    WebSocket.acceptOrResult[WSMessage, WSMessage] {
+      case rh if sameOriginCheck(rh) =>
+        wsFutureFlow(rh).map { flow =>
+          Right(flow)
+        }.recover {
+          case e: Exception =>
+            logger.error("Cannot create websocket", e)
+            val jsError = Json.obj("error" -> "Cannot create websocket")
+            val result = InternalServerError(jsError)
+            Left(result)
+        }
+
+      case rejected =>
+        logger.error(s"Request ${rejected} failed same origin check")
+        Future.successful {
+          Left(Forbidden("forbidden"))
+        }
+    }
 
   def chat(): WebSocket = {
     WebSocket.acceptOrResult[WSMessage, WSMessage] {
@@ -70,6 +102,25 @@ class HomeController @Inject()(cc: ControllerComponents)
           Left(Forbidden("forbidden"))
         }
     }
+  }
+
+  /**
+    * Creates a Future containing a Flow of JsValue in and out.
+    */
+  private def wsFutureFlow(request: RequestHeader): Future[Flow[WSMessage, WSMessage, NotUsed]] = {
+    // Use guice assisted injection to instantiate and configure the child actor.
+    implicit val timeout = Timeout(1.second) // the first run in dev can take a while :-(
+    // val future: Future[Any] = userParentActor ? UserParentActor.Create(request.id.toString)
+    // request.mapTo[Flow[WSMessage, WSMessage, NotUsed]]
+    //futureFlow
+    Future(Flow[WSMessage]
+        .map({ s =>
+          history.append(s)
+          logger.info(history.toString())
+          s
+        })
+        .map((s) => s)
+        .via(userFlow))
   }
 
   /**
@@ -112,4 +163,8 @@ class HomeController @Inject()(cc: ControllerComponents)
     }
   }
 
+}
+
+object HomeController {
+  type WSMessage = String
 }

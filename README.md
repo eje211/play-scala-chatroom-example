@@ -1,3 +1,11 @@
+# Simple exercise to learn Play
+
+This is a simple exercise I came up with. The point was to slightly change Play's chatroom example
+so that newly opened pages showed the history of the conversation so far.
+
+This is in now meant to be production-ready or scalable. It's just a simple exercise to try to get
+used to Play and Akka's concept of streams and actors.
+
 # play-scala-chatroom-example
 
 [<img src="https://img.shields.io/travis/playframework/play-scala-chatroom-example.svg"/>](https://travis-ci.org/playframework/play-scala-chatroom-example)
